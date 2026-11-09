@@ -1,5 +1,8 @@
-from datetime import datetime
 from portaria import repositorio as repo
+from portaria import servicos
+from portaria.erros import RegraNegocioError
+from portaria.validacao import mascarar_documento, normalizar_documento
+
 import sqlite3
 
 from PySide6.QtWidgets import (
@@ -97,11 +100,15 @@ class JanelaPrincipal(QWidget):
         self.atualizar_tabela()
 
     def carregar_setores(self):
+        """Mostra a ocupação atual de cada setor."""
         selecionado = self.combo_setor.currentData()
         self.combo_setor.clear()
         self.combo_setor.addItem("Selecione um setor", None)
-        for setor in repo.listar_setores_ativos(self.conn):
-            self.combo_setor.addItem(setor["nome"], setor["id"])
+        for s in repo.listar_setores_ativos(self.conn):
+            ocupacao = repo.contar_presentes_no_setor(self.conn, s["id"])
+            self.combo_setor.addItem(
+                f"{s['nome']} ({ocupacao}/{s['lotacao_maxima']})", s["id"]
+            )
         self.combo_setor.setCurrentIndex(max(self.combo_setor.findData(selecionado), 0))
 
 
@@ -118,44 +125,26 @@ class JanelaPrincipal(QWidget):
             self.campo_nome.setReadOnly(False)
     
     def registrar_entrada(self):
-        cpf = normalizar_documento(self.campo_cpf.text())
-        nome = " ".join(self.campo_nome.text().split())
+        documento = self.campo_cpf.text()
         setor_id = self.combo_setor.currentData()
-
-        if not cpf_valido(cpf):
-            self.mensagem.setText("CPF inválido. Confira os 11 dígitos.")
-            return
-        if not nome:
-            self.mensagem.setText("Informe o nome do visitante.")
-            return
         if setor_id is None:
             self.mensagem.setText("Selecione o setor de destino.")
             return
 
         try:
-            # Verificações antecipadas: evita abandonar uma transação já
-            # iniciada por INSERT usando return dentro de with self.conn.
-            visitante = repo.buscar_visitante_por_documento(self.conn, cpf)
-            if visitante and repo.visita_aberta_do_visitante(self.conn, visitante["id"]):
-                self.mensagem.setText(f"{nome} já está no prédio. Registre a saída antes.")
-                return
-            cracha = repo.buscar_cracha_disponivel(self.conn)
-            if cracha is None:
-                self.mensagem.setText("Não há crachá disponível. Aguarde uma devolução.")
-                return
-
-            with self.conn:
-                visitante_id = (
-                    visitante["id"] if visitante is not None
-                    else repo.inserir_visitante(self.conn, nome, cpf)
-                )
-                repo.inserir_visita(
-                    self.conn, visitante_id, setor_id, cracha["id"], None, agora()
-                )
-                repo.atualizar_situacao_cracha(self.conn, cracha["id"], "em_uso")
+            servicos.registrar_entrada(
+                self.conn, documento, setor_id, nome=self.campo_nome.text()
+            )
+        except RegraNegocioError as erro:
+            self.mensagem.setText(str(erro))
+            return
         except sqlite3.Error as erro:
             QMessageBox.critical(self, "Portaria Digital", f"Erro no banco: {erro}")
             return
+
+        self.limpar_campos()
+        self.mensagem.setText("Entrada registrada. Entregue o crachá indicado na tabela.")
+        self.atualizar_tudo()
 
         self.limpar_campos()
         self.mensagem.setText(f"Entrada registrada. Entregue o crachá {cracha['codigo']}.")
@@ -168,42 +157,37 @@ class JanelaPrincipal(QWidget):
             return
         visita_id = int(self.tabela.item(linha, 0).text())
         try:
-            with self.conn:
-                visita = repo.obter_visita(self.conn, visita_id)
-                if visita is None or visita["saida"] is not None:
-                    self.mensagem.setText("Esta visita já foi encerrada.")
-                    return
-                repo.encerrar_visita(self.conn, visita_id, agora())
-                repo.atualizar_situacao_cracha(
-                    self.conn, visita["cracha_id"], "disponivel"
-                )
+            servicos.registrar_saida(self.conn, visita_id)
+        except RegraNegocioError as erro:
+            self.mensagem.setText(str(erro))
+            return
         except sqlite3.Error as erro:
             QMessageBox.critical(self, "Portaria Digital", f"Erro no banco: {erro}")
             return
         self.mensagem.setText("Saída registrada. Crachá devolvido.")
+        self.atualizar_tudo()
+
+    def atualizar_tudo(self):
+        self.carregar_setores()
         self.atualizar_tabela()
 
     def atualizar_tabela(self):
+        # Presentes nunca passam do número de crachás: filtrar em memória é aceitável.
         presentes = repo.listar_presentes(self.conn)
         termo = self.campo_filtro.text().strip().lower()
-        linhas = [
-            visita for visita in presentes
-            if termo in f"{visita['nome']} {visita['setor']}".lower()
-        ]
+        linhas = [l for l in presentes if termo in f"{l['nome']} {l['setor']}".lower()]
+
         self.tabela.setRowCount(len(linhas))
-        for i, visita in enumerate(linhas):
-            valores = [
-                visita["id"], visita["nome"],
-                mascarar_documento(visita["documento"]),
-                visita["setor"], visita["cracha"], visita["entrada"]
-            ]
+        for i, l in enumerate(linhas):
+            valores = [l["id"], l["nome"], mascarar_documento(l["documento"]),
+                       l["setor"], l["cracha"], l["entrada"]]
             for j, valor in enumerate(valores):
                 self.tabela.setItem(i, j, QTableWidgetItem(str(valor)))
         self.tabela.setCurrentCell(-1, -1)
+
         crachas = repo.contar_crachas_por_situacao(self.conn)
         self.contador.setText(
-            f"No prédio: {len(presentes)} | "
-            f"Crachás livres: {crachas.get('disponivel', 0)}"
+            f"No prédio: {len(presentes)} | Crachás livres: {crachas.get('disponivel', 0)}"
         )
     def presentes(self):
         return [v for v in self.visitas if v["saida"] is None]
