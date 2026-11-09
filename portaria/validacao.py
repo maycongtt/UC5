@@ -2,13 +2,16 @@
 
 import re
 
+
 def normalizar_nome(nome: str | None) -> str:
     """Remove espaços nas pontas e espaços repetidos no meio."""
     return " ".join((nome or "").split())
 
+
 def normalizar_documento(valor: str | None) -> str:
     """Mantém apenas dígitos: '123.456.789-09' -> '12345678909'."""
     return re.sub(r"\D", "", valor or "")
+
 
 def cpf_valido(valor: str | None) -> bool:
     """Valida os dígitos verificadores do CPF.
@@ -25,6 +28,7 @@ def cpf_valido(valor: str | None) -> bool:
         if digito != int(d[posicao]):
             return False
     return True
+
 
 def mascarar_documento(valor: str | None) -> str:
     """Exibe só o miolo do CPF (***.456.789-**), reduzindo exposição na tela."""
