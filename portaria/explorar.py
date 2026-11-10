@@ -1,46 +1,71 @@
-"""Laboratório de SQL: rode, leia a saída e responda às perguntas."""
+"""Mapeamento ORM das tabelas da Portaria Digital, para comparação com o SQL explícito.
 
-import sqlite3
-from pathlib import Path
+Não substitui repositorio.py: é um módulo isolado de estudo.
+"""
 
-conn = sqlite3.connect(":memory:")  # banco descartável, só na memória
-conn.row_factory = sqlite3.Row
-conn.execute("PRAGMA foreign_keys = ON")
-conn.executescript(Path("portaria/schema.sql").read_text(encoding="utf-8"))
+from sqlalchemy import ForeignKey, create_engine, select
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, selectinload
 
-conn.execute("INSERT INTO setor (nome, lotacao_maxima) VALUES (?, ?)", ("Secretaria", 5))
-conn.execute("INSERT INTO cracha (codigo) VALUES (?)", ("V-01",))
-conn.execute("INSERT INTO visitante (nome, documento) VALUES (?, ?)", ("Ana Lima", "52998224725"))
-conn.execute("INSERT INTO visitante (nome, documento) VALUES (?, ?)", ("Bruno Sousa", "11144477735"))
 
-# 1. CREATE: abrir uma visita
-conn.execute(
-    "INSERT INTO visita (visitante_id, setor_id, cracha_id, entrada) VALUES (?, ?, ?, ?)",
-    (1, 1, 1, "2026-10-21 09:00:00"),
-)
+class Base(DeclarativeBase):
+    pass
 
-# 2. READ: quem está no prédio
-for linha in conn.execute("SELECT visitante_id, entrada FROM visita WHERE saida IS NULL"):
-    print("presente:", dict(linha))
 
-# 3. UPDATE: encerrar a visita
-conn.execute("UPDATE visita SET saida = ? WHERE id = ?", ("2026-10-21 09:40:00", 1))
-print("presentes depois do UPDATE:",
-      conn.execute("SELECT COUNT(*) FROM visita WHERE saida IS NULL").fetchone()[0])
+class Setor(Base):
+    __tablename__ = "setor"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nome: Mapped[str]
+    lotacao_maxima: Mapped[int]
+    ativo: Mapped[int]
 
-# 4. DELETE: tentar apagar um visitante que tem histórico
-try:
-    conn.execute("DELETE FROM visitante WHERE id = ?", (1,))
-except sqlite3.IntegrityError as erro:
-    print("DELETE recusado:", erro)
 
-# 5. Por que placeholders? Compare as duas buscas com a mesma entrada maliciosa.
-entrada = "' OR '1'='1"
-inseguro = conn.execute(
-    f"SELECT nome FROM visitante WHERE documento = '{entrada}'"
-).fetchall()
-seguro = conn.execute(
-    "SELECT nome FROM visitante WHERE documento = ?", (entrada,)
-).fetchall()
-print("concatenando:   ", [l["nome"] for l in inseguro])
-print("com placeholder:", [l["nome"] for l in seguro])
+class Visitante(Base):
+    __tablename__ = "visitante"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    nome: Mapped[str]
+    documento: Mapped[str]
+    visitas: Mapped[list["Visita"]] = relationship(back_populates="visitante")
+
+
+class Cracha(Base):
+    __tablename__ = "cracha"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    codigo: Mapped[str]
+    situacao: Mapped[str]
+
+
+class Visita(Base):
+    __tablename__ = "visita"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    visitante_id: Mapped[int] = mapped_column(ForeignKey("visitante.id"))
+    setor_id: Mapped[int] = mapped_column(ForeignKey("setor.id"))
+    cracha_id: Mapped[int] = mapped_column(ForeignKey("cracha.id"))
+    motivo: Mapped[str | None]
+    entrada: Mapped[str]
+    saida: Mapped[str | None]
+
+    visitante: Mapped[Visitante] = relationship(back_populates="visitas")
+    setor: Mapped[Setor] = relationship()
+    cracha: Mapped[Cracha] = relationship()
+
+
+def criar_engine(caminho: str = "portaria.db", echo: bool = False):
+    return create_engine(f"sqlite:///{caminho}", echo=echo)
+
+
+def listar_presentes_orm(engine) -> list[tuple[int, str, str, str]]:
+    with Session(engine) as sessao:
+        consulta = (
+            select(Visita)
+            .where(Visita.saida.is_(None))
+            .options(
+                selectinload(Visita.visitante),
+                selectinload(Visita.setor),
+                selectinload(Visita.cracha),
+            )
+            .order_by(Visita.entrada)
+        )
+        return [
+            (v.id, v.visitante.nome, v.setor.nome, v.cracha.codigo)
+            for v in sessao.scalars(consulta)
+        ]
